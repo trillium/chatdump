@@ -135,7 +135,7 @@ if (hasSingleInstanceLock) {
     }
 
     const { onStatus, buildMenu } = createTray();
-    startIpcServer();
+    startIpcServer({ onAccountsChanged: buildMenu, onStatus });
     initUpdater(buildMenu);
 
     if (getAccounts().length > 0) {

@@ -6,6 +6,7 @@ const {
     accountSummary,
     selectAccounts,
     handleList,
+    handleLogin,
     handleSync,
     handleMcpAccounts,
     handleMcpAsk,
@@ -117,6 +118,56 @@ test('handleList in json mode sends a single JSON stdout message', () => {
   assert.equal(sent.length, 1);
   const parsed = JSON.parse(sent[0].text);
   assert.equal(parsed.accounts.length, 1);
+});
+
+test('handleLogin requires an explicit ChatGPT side-effect acknowledgement', async () => {
+  const { send } = collector();
+  await assert.rejects(
+    () =>
+      handleLogin({ accountIds: [] }, send, {
+        store: makeStore([]),
+        scheduler: {},
+        providers,
+        auth: {},
+        accountAdd: {},
+      }),
+    /accept-chatgpt-sidebar-effect/,
+  );
+});
+
+test('handleLogin re-authenticates an existing account through a browser window', async () => {
+  const account = { id: 'openai:a@example.com', provider: 'openai', email: 'a@example.com' };
+  const updates = [];
+  const store = {
+    ...makeStore([account]),
+    upsertAccount: (value) => updates.push(value),
+    updateAccount: () => {},
+  };
+  const auth = {
+    openLoginWindow: async (provider, accountId) => {
+      assert.equal(provider, 'openai');
+      assert.equal(accountId, account.id);
+    },
+    getSession: () => ({ clearStorageData: async () => {} }),
+  };
+  const loginProviders = {
+    ...providers,
+    getProvider: (name) =>
+      name === 'openai'
+        ? { name, displayName: 'ChatGPT', getAccountInfo: async () => ({ email: account.email }) }
+        : null,
+  };
+  const { sent, send } = collector();
+
+  const exitCode = await handleLogin(
+    { accountIds: [account.id], acceptChatGptSidebarEffect: true, json: true },
+    send,
+    { store, scheduler: {}, providers: loginProviders, auth, accountAdd: {} },
+  );
+
+  assert.equal(exitCode, 0);
+  assert.equal(updates[0].status, 'ok');
+  assert.equal(JSON.parse(sent.at(-1).text).created, false);
 });
 
 test('handleSync returns exit code 2 when no accounts match', async () => {

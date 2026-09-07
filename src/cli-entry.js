@@ -58,7 +58,7 @@ async function main(argv, deps = {}) {
     return 0;
   }
 
-  if (options.command === 'list' || options.command === 'sync') {
+  if (options.command === 'login' || options.command === 'list' || options.command === 'sync') {
     const { command, ...delegatedArgs } = options;
     return runViaDelegationImpl(command, delegatedArgs);
   }

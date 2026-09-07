@@ -32,6 +32,26 @@ test('parseArgs accepts mcp command', () => {
   assert.equal(options.command, 'mcp');
 });
 
+test('parseArgs parses a ChatGPT login acknowledgement', () => {
+  const options = parseArgs([
+    'login',
+    '--account',
+    'openai:user@example.com',
+    '--accept-chatgpt-sidebar-effect',
+    '--json',
+  ]);
+
+  assert.equal(options.command, 'login');
+  assert.deepEqual(options.accountIds, ['openai:user@example.com']);
+  assert.equal(options.acceptChatGptSidebarEffect, true);
+  assert.equal(options.json, true);
+});
+
+test('parseArgs rejects sync-only login options', () => {
+  assert.throws(() => parseArgs(['login', '--since-days', '7']), /login supports only/);
+  assert.throws(() => parseArgs(['login', '--account', 'a', '--account', 'b']), /at most one/);
+});
+
 test('parseArgs rejects options that do not belong to the command', () => {
   assert.throws(() => parseArgs(['list', '--since-days', '7']), /list supports only --json/);
   assert.throws(() => parseArgs(['mcp', '--json']), /mcp does not accept options/);
@@ -68,6 +88,22 @@ test('parseArgs rejects incompatible sync modes', () => {
     () => parseArgs(['sync', '--since-days', '7', '--full-sync', 'created_at']),
     /cannot be used together/,
   );
+});
+
+test('cli-entry login delegates to the GUI IPC server', async () => {
+  let request;
+  const exitCode = await main(['login', '--accept-chatgpt-sidebar-effect'], {
+    stdout: { write: () => {} },
+    stderr: { write: () => {} },
+    runViaDelegation: async (cmd, args) => {
+      request = { cmd, args };
+      return 0;
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.equal(request.cmd, 'login');
+  assert.equal(request.args.acceptChatGptSidebarEffect, true);
 });
 
 test('cli-entry fetch delegates to mcp.conversation and prints markdown only', async () => {

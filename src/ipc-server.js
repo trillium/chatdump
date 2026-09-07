@@ -13,6 +13,7 @@ const { app } = require('electron');
 const { encode, createLineDecoder } = require('./ipc-protocol');
 
 let server = null;
+let runtimeDeps = {}; // UI callbacks supplied by main after the tray is created.
 
 function getSocketPath() {
   return path.join(app.getPath('userData'), 'cli.sock');
@@ -169,7 +170,101 @@ function defaultDeps() {
     store: require('./store'),
     scheduler: require('./scheduler'),
     providers: require('./providers'),
+    auth: require('./auth'),
+    accountAdd: require('./account-add'),
+    onAccountsChanged: () => {},
+    onStatus: () => {},
   };
+}
+
+function sendLoginResult(args, send, result) {
+  if (args.json) {
+    send({ type: 'stdout', text: JSON.stringify(result, null, 2) });
+    return;
+  }
+  send({ type: 'stdout', text: `Logged in: ${result.accountId}` });
+}
+
+// Login necessarily stays interactive: this command opens the provider's normal
+// browser window, then waits for the browser session cookie that proves login.
+// It never accepts credentials on stdin or in command-line arguments.
+async function handleLogin(args, send, deps) {
+  const {
+    store,
+    scheduler,
+    providers,
+    auth,
+    accountAdd,
+    onAccountsChanged = () => {},
+    onStatus = () => {},
+  } = deps;
+  const providerName = args.provider || 'openai';
+  const provider = providers.getProvider(providerName);
+  if (!provider) throw new Error(`Unknown provider: ${providerName}`);
+  if (provider.name === 'openai' && !args.acceptChatGptSidebarEffect) {
+    throw new Error(
+      "ChatGPT login requires --accept-chatgpt-sidebar-effect: reading chats can temporarily move them in ChatGPT's sidebar.",
+    );
+  }
+
+  const requestedAccountId = args.accountIds?.[0];
+  if (requestedAccountId) {
+    const account = store.getAccount(requestedAccountId);
+    if (!account) throw new Error(`Account not found: ${requestedAccountId}`);
+    if (account.provider !== provider.name) {
+      throw new Error(
+        `Account ${requestedAccountId} belongs to ${account.provider}, not ${provider.name}`,
+      );
+    }
+    send({
+      type: 'progress',
+      state: 'login',
+      message: `Opening ${provider.displayName} login window…`,
+      accountId: account.id,
+    });
+    await auth.openLoginWindow(provider.name, account.id);
+    const info = await provider.getAccountInfo(auth.getSession(account.id));
+    if (account.email && info?.email && account.email !== info.email) {
+      await auth.getSession(account.id).clearStorageData();
+      store.updateAccount(account.id, {
+        status: 'expired',
+        lastError: `Logged in as ${info.email}; expected ${account.email} — logged out, please re-login`,
+      });
+      onAccountsChanged();
+      throw new Error(`Logged in as ${info.email}; expected ${account.email}`);
+    }
+    store.upsertAccount({ ...account, ...info, status: 'ok', lastError: null });
+    onAccountsChanged();
+    sendLoginResult(args, send, { accountId: account.id, provider: provider.name, created: false });
+    return 0;
+  }
+
+  send({
+    type: 'progress',
+    state: 'login',
+    message: `Opening ${provider.displayName} login window…`,
+  });
+  const result = await accountAdd.addAccount(provider, {
+    openLoginWindow: auth.openLoginWindow,
+    getSession: auth.getSession,
+    upsertAccount: store.upsertAccount,
+    updateAccount: store.updateAccount,
+    removeAccount: store.removeAccount,
+    getAccounts: store.getAccounts,
+    onAccountsChanged,
+    startInitialSync: (accountId) =>
+      scheduler.syncAccount(accountId, onStatus).catch((e) => {
+        console.error(`Initial sync failed for ${accountId}: ${e.message}`);
+      }),
+    logger: (message) => console.log(message),
+  });
+  if (!result.ok) throw new Error(result.error || 'Login failed');
+  sendLoginResult(args, send, {
+    accountId: result.accountId,
+    provider: provider.name,
+    created: true,
+  });
+  return 0;
 }
 
 async function handleMcpAccounts(args, send, { store, providers }) {
@@ -246,6 +341,9 @@ async function handleMcpSync(args, send, { store, scheduler, providers }) {
 // and resolving with the exit code once the command is done.
 async function dispatch(request, send, deps = defaultDeps()) {
   const { cmd, args = {} } = request;
+  if (cmd === 'login') {
+    return handleLogin(args, send, deps);
+  }
   if (cmd === 'list') {
     return handleList(args, send, deps);
   }
@@ -276,7 +374,7 @@ function handleConnection(socket) {
     };
 
     Promise.resolve()
-      .then(() => dispatch(msg, send))
+      .then(() => dispatch(msg, send, { ...defaultDeps(), ...runtimeDeps }))
       .then((exitCode) => send({ type: 'result', exitCode }))
       .catch((e) => send({ type: 'error', message: e.message, exitCode: 1 }));
   });
@@ -303,7 +401,8 @@ function listen(socketPath) {
 
 // Start the socket server. Safe to call once, from the GUI process's
 // app.whenReady() handler.
-function startIpcServer() {
+function startIpcServer(deps = {}) {
+  runtimeDeps = deps;
   const socketPath = getSocketPath();
 
   if (!fs.existsSync(socketPath)) {
@@ -335,6 +434,7 @@ function stopIpcServer() {
   const socketPath = getSocketPath();
   server.close();
   server = null;
+  runtimeDeps = {};
   try {
     fs.unlinkSync(socketPath);
   } catch {
@@ -351,6 +451,8 @@ module.exports = {
     validateProviderSyncOptions,
     formatAccountBlock,
     handleList,
+    handleLogin,
+    sendLoginResult,
     handleSync,
     handleMcpAccounts,
     handleMcpAsk,

@@ -4,18 +4,21 @@
 // for `list`/`sync`/`fetch`/`mcp.*` lives in src/ipc-server.js, which runs
 // inside the GUI Electron process and is reached over the IPC socket (see
 // src/ipc-client.js).
-const COMMANDS = new Set(['help', 'list', 'sync', 'fetch', 'mcp']);
+const COMMANDS = new Set(['help', 'login', 'list', 'sync', 'fetch', 'mcp']);
 
 function printHelp(stream = process.stdout) {
   stream.write(`chatdump CLI
 
 Usage:
+  chatdump login [--provider <name>] [--account <id>] [--accept-chatgpt-sidebar-effect] [--json]
   chatdump list [--json]
   chatdump sync [--account <id>] [--provider <name>] [--since-days <days>] [--full-sync <created_at|last_message_at>] [--json]
   chatdump fetch <url-or-id> [--account <id>] [--provider <name>] [--json]
   chatdump mcp
 
 Examples:
+  chatdump login --provider openai --accept-chatgpt-sidebar-effect
+  chatdump login --account openai:user@example.com --accept-chatgpt-sidebar-effect
   chatdump list
   chatdump sync
   chatdump sync --account openai:user@example.com --since-days 7
@@ -24,8 +27,9 @@ Examples:
   chatdump mcp
 
 Notes:
-  The CLI reuses the Electron app's configured accounts and persisted login sessions.
-  It does not open provider login windows; re-login from the menu bar app if auth expired.
+  login opens the provider's normal browser login window; it cannot bypass passwords, passkeys, MFA, or CAPTCHAs.
+  For ChatGPT, --accept-chatgpt-sidebar-effect acknowledges that reading chats can temporarily reorder its sidebar.
+  Other CLI commands reuse the Electron app's configured accounts and persisted login sessions.
   The MCP server speaks stdio and is intended to be launched by an MCP client.
 `);
 }
@@ -46,6 +50,7 @@ function parseArgs(args) {
     sinceDays: undefined,
     mode: undefined,
     conversationId: undefined,
+    acceptChatGptSidebarEffect: false,
   };
 
   if (!COMMANDS.has(options.command)) {
@@ -56,6 +61,8 @@ function parseArgs(args) {
     const arg = args[i];
     if (arg === '--json') {
       options.json = true;
+    } else if (arg === '--accept-chatgpt-sidebar-effect') {
+      options.acceptChatGptSidebarEffect = true;
     } else if (arg === '--account') {
       const value = args[++i];
       if (!value) throw new CliUsageError('--account requires an account id');
@@ -90,6 +97,17 @@ function parseArgs(args) {
     throw new CliUsageError('--since-days and --full-sync cannot be used together');
   }
 
+  if (options.command === 'login') {
+    if (options.accountIds.length > 1) {
+      throw new CliUsageError('login accepts at most one --account');
+    }
+    if (options.sinceDays !== undefined || options.mode || options.conversationId) {
+      throw new CliUsageError(
+        'login supports only --provider, --account, --accept-chatgpt-sidebar-effect, and --json',
+      );
+    }
+  }
+
   if (options.command === 'fetch') {
     if (!options.conversationId) {
       throw new CliUsageError('fetch requires a url or conversation id');
@@ -97,7 +115,7 @@ function parseArgs(args) {
     if (options.accountIds.length > 1) {
       throw new CliUsageError('fetch accepts at most one --account');
     }
-    if (options.sinceDays !== undefined || options.mode) {
+    if (options.sinceDays !== undefined || options.mode || options.acceptChatGptSidebarEffect) {
       throw new CliUsageError('fetch supports only --account, --provider, and --json');
     }
   }
@@ -110,16 +128,28 @@ function parseArgs(args) {
 function validateCommandOptions(options) {
   const hasSelection = options.accountIds.length > 0 || Boolean(options.provider);
   const hasSyncOptions = options.sinceDays !== undefined || options.mode;
-  if (options.command === 'help' && (options.json || hasSelection || hasSyncOptions)) {
+  if (
+    options.command === 'help' &&
+    (options.json || hasSelection || hasSyncOptions || options.acceptChatGptSidebarEffect)
+  ) {
     throw new CliUsageError('help does not accept options');
   }
-  if (options.command === 'list' && (hasSelection || hasSyncOptions || options.conversationId)) {
+  if (
+    options.command === 'list' &&
+    (hasSelection || hasSyncOptions || options.conversationId || options.acceptChatGptSidebarEffect)
+  ) {
     throw new CliUsageError('list supports only --json');
   }
-  if (options.command === 'mcp' && (options.json || hasSelection || hasSyncOptions)) {
+  if (
+    options.command === 'mcp' &&
+    (options.json || hasSelection || hasSyncOptions || options.acceptChatGptSidebarEffect)
+  ) {
     throw new CliUsageError('mcp does not accept options');
   }
-  if (options.command === 'sync' && options.conversationId) {
+  if (
+    options.command === 'sync' &&
+    (options.conversationId || options.acceptChatGptSidebarEffect)
+  ) {
     throw new CliUsageError('sync does not accept a conversation reference');
   }
 }
